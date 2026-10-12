@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:width="288dp" android:height="288dp">
+        <shape><solid android:color="#00172E" /></shape>
+    </item>
+    <item android:width="110dp" android:height="110dp" android:gravity="center">
+        <bitmap android:src="@drawable/ump_crest_transparent" android:gravity="fill" android:filter="true" />
+    </item>
+</layer-list>

@@ -1,0 +1,309 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function approved(c) {
+      return exists(/databases/$(database)/documents/clubs/$(c))
+        && get(/databases/$(database)/documents/clubs/$(c)).data.status == 'APPROVED'
+        && get(/databases/$(database)/documents/clubs/$(c)).data.isActive == true;
+    }
+    function admin(c) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/adminAccess/$(request.auth.uid))
+        && get(/databases/$(database)/documents/adminAccess/$(request.auth.uid)).data.isActive == true
+        && get(/databases/$(database)/documents/adminAccess/$(request.auth.uid)).data.clubId == c
+        && (!exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.accountStatus == 'ACTIVE')
+        && approved(c);
+    }
+    function owner(c) {
+      return admin(c) && get(/databases/$(database)/documents/adminAccess/$(request.auth.uid)).data.get('canManageAdmins', false) == true;
+    }
+    function myClub() {
+      return get(/databases/$(database)/documents/adminAccess/$(request.auth.uid)).data.clubId;
+    }
+    function memberText(v) { return v == null ? '' : string(v); }
+    function text(v, n) { return v is string && v.size() <= n; }
+    function activeAdmin(u) {
+      return exists(/databases/$(database)/documents/adminAccess/$(u))
+        && get(/databases/$(database)/documents/adminAccess/$(u)).data.isActive == true;
+    }
+    match /users/{u} {
+      allow create: if signedIn() && request.auth.uid == u
+        && request.resource.data.uid == u && request.resource.data.role == 'STUDENT'
+        && request.resource.data.accountStatus == 'ACTIVE';
+      allow read: if signedIn() && request.auth.uid == u;
+      allow update: if signedIn() && request.auth.uid == u
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.accountStatus == resource.data.accountStatus
+        && (memberText(resource.data.get('studentNumber', '')) == ''
+          || memberText(request.resource.data.get('studentNumber', '')) == memberText(resource.data.get('studentNumber', '')))
+        && (memberText(resource.data.get('department', '')) == ''
+          || memberText(request.resource.data.get('department', '')) == memberText(resource.data.get('department', '')))
+        && (memberText(resource.data.get('course', '')) == ''
+          || memberText(request.resource.data.get('course', '')) == memberText(resource.data.get('course', '')));
+      allow delete: if false;
+    }
+    match /users/{u}/notificationState/{n} {
+      function validNoticeState() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['read','hidden','updatedAt'])
+          && d.keys().hasAll(['updatedAt'])
+          && (d.get('read',false) == true || d.get('hidden',false) == true)
+          && (!('read' in d) || d.read == true)
+          && (!('hidden' in d) || d.hidden == true)
+          && d.updatedAt == request.time;
+      }
+      allow read: if signedIn() && request.auth.uid == u;
+      allow create, update: if signedIn() && request.auth.uid == u && validNoticeState();
+      allow delete: if false;
+    }
+    match /clubApplications/{applicantId} {
+      allow get: if signedIn() && request.auth.uid == applicantId;
+      allow list: if signedIn() && resource.data.applicantId == request.auth.uid;
+      allow create: if signedIn() && request.auth.uid == applicantId
+        && exists(/databases/$(database)/documents/users/$(applicantId))
+        && get(/databases/$(database)/documents/users/$(applicantId)).data.role == 'STUDENT'
+        && get(/databases/$(database)/documents/users/$(applicantId)).data.accountStatus == 'ACTIVE'
+        && request.resource.data.keys().hasAll(['applicantId','name','category','purpose','location','policyAccepted','policyGuideVersion','constitutionPrepared','signatoriesPrepared','advisorIdentified','status','createdAt','updatedAt'])
+        && request.resource.data.keys().hasOnly(['applicantId','name','category','purpose','location','policyAccepted','policyGuideVersion','constitutionPrepared','signatoriesPrepared','advisorIdentified','status','createdAt','updatedAt'])
+        && request.resource.data.applicantId == applicantId
+        && text(request.resource.data.name,150) && request.resource.data.name.size() >= 3
+        && text(request.resource.data.category,100) && request.resource.data.category.size() > 0
+        && text(request.resource.data.purpose,5000) && request.resource.data.purpose.size() >= 20
+        && text(request.resource.data.location,300) && request.resource.data.location.size() > 0
+        && request.resource.data.policyAccepted == true
+        && request.resource.data.policyGuideVersion == 'PROTOTYPE_1'
+        && request.resource.data.constitutionPrepared == true
+        && request.resource.data.signatoriesPrepared == true
+        && request.resource.data.advisorIdentified == true
+        && request.resource.data.status == 'PENDING'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update, delete: if false;
+    }
+    match /adminAccess/{u} {
+      function grantValid() {
+        let d = request.resource.data;
+        let m = get(/databases/$(database)/documents/clubMembers/$(d.membershipId)).data;
+        return owner(d.clubId) && u != request.auth.uid
+          && d.keys().hasAll(['clubId','clubCode','isActive','canManageAdmins','notificationsEnabled','membershipId','updatedAt'])
+          && d.keys().hasOnly(['clubId','clubCode','isActive','canManageAdmins','notificationsEnabled','membershipId','updatedAt'])
+          && text(d.clubCode, 100) && d.clubCode == get(/databases/$(database)/documents/adminAccess/$(request.auth.uid)).data.clubCode
+          && d.isActive == true && d.canManageAdmins == false
+          && d.notificationsEnabled is bool && d.updatedAt == request.time
+          && m.clubId == d.clubId && m.userId == u && m.status == 'ACTIVE'
+          && !exists(/databases/$(database)/documents/clubRestrictions/$(d.clubId)/users/$(u));
+      }
+      allow get: if signedIn() && (u == request.auth.uid
+        || (!exists(/databases/$(database)/documents/adminAccess/$(u)) && admin(myClub()))
+        || admin(resource.data.clubId));
+      allow list: if admin(resource.data.clubId);
+      allow create: if grantValid();
+      allow update: if (
+        signedIn() && u == request.auth.uid && admin(resource.data.clubId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['notificationsEnabled'])
+        && request.resource.data.notificationsEnabled is bool
+      ) || (
+        owner(resource.data.clubId) && u != request.auth.uid
+        && resource.data.get('canManageAdmins', false) == false
+        && request.resource.data.clubId == resource.data.clubId
+        && ((grantValid()) || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive','updatedAt'])
+          && request.resource.data.isActive == false && request.resource.data.updatedAt == request.time
+        ))
+      );
+      allow delete: if false;
+      match /notificationReads/{n} {
+        allow read: if signedIn() && request.auth.uid == u;
+        allow create, update: if signedIn() && request.auth.uid == u
+          && admin(get(/databases/$(database)/documents/adminNotifications/$(n)).data.clubId)
+          && request.resource.data.keys().hasOnly(['readAt'])
+          && request.resource.data.readAt == request.time;
+        allow delete: if false;
+      }
+    }
+    match /clubs/{c} {
+      allow read: if signedIn() && resource.data.status == 'APPROVED' && resource.data.isActive == true;
+      allow update: if admin(c)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','description','history','category','updatedAt'])
+        && text(request.resource.data.name,150) && request.resource.data.name.size() > 0
+        && text(request.resource.data.description,5000)
+        && text(request.resource.data.get('history',''),10000)
+        && request.resource.data.category in ['SPORT','CULTURE','ADVOCACY','IDENTITY','ACADEMIC']
+        && request.resource.data.updatedAt == request.time;
+      allow create, delete: if false;
+      match /leadership/{l} {
+        allow read: if signedIn() && approved(c) && resource.data.isActive == true;
+        function validLeader() {
+          let d = request.resource.data;
+          return d.keys().hasAll(['userId','membershipId','name','role','order','isActive','updatedAt','photoUrl','bio'])
+            && d.keys().hasOnly(['userId','membershipId','name','role','order','isActive','updatedAt','photoUrl','bio'])
+            && text(d.name,80) && d.name.size() >= 2
+            && text(d.role,100) && d.role.size() >= 2
+            && text(d.bio,500) && text(d.photoUrl,2048)
+            && (d.photoUrl == '' || d.photoUrl.matches('https://[^\\s]+'))
+            && d.order is int && d.order >= 0 && d.order <= 999
+            && d.isActive == true && d.updatedAt == request.time
+            && text(d.userId,128) && text(d.membershipId,150)
+            && ((d.membershipId == '' && d.userId == '') || linkedLeader(d));
+        }
+        function linkedLeader(d) {
+          let m = get(/databases/$(database)/documents/clubMembers/$(d.membershipId)).data;
+          return d.membershipId.size() > 0 && d.userId.size() > 0
+            && m.clubId == c && m.status == 'ACTIVE' && m.userId == d.userId;
+        }
+        allow create, update: if admin(c) && validLeader();
+        allow delete: if admin(c);
+      }
+    }
+    match /posts/{p} {
+      allow read: if signedIn() && resource.data.status == 'PUBLISHED' && resource.data.isActive == true;
+      allow create: if admin(request.resource.data.clubId)
+        && request.resource.data.keys().hasAll(['clubId','clubName','clubShortName','authorId','type','text','imageUrl','status','isActive','createdAt','updatedAt'])
+        && request.resource.data.keys().hasOnly(['clubId','clubName','clubShortName','authorId','type','text','imageUrl','status','isActive','createdAt','updatedAt'])
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.clubName == get(/databases/$(database)/documents/clubs/$(request.resource.data.clubId)).data.name
+        && text(request.resource.data.clubShortName,150)
+        && request.resource.data.type == 'TEXT' && text(request.resource.data.text,5000)
+        && request.resource.data.text.size() > 0 && request.resource.data.imageUrl == ''
+        && request.resource.data.status == 'PUBLISHED' && request.resource.data.isActive == true
+        && request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
+      allow update: if admin(resource.data.clubId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text','updatedAt'])
+        && text(request.resource.data.text,5000)
+        && (resource.data.type != 'TEXT' || request.resource.data.text.size() > 0)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if admin(resource.data.clubId);
+    }
+    match /events/{e} {
+      function validEvent() {
+        let d = request.resource.data;
+        return text(d.title,150) && d.title.size() > 0 && text(d.description,5000)
+          && text(d.category,100) && text(d.location,300) && d.location.size() > 0
+          && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && d.time is string && d.time.matches('^[0-9]{2}:[0-9]{2}$')
+          && d.eventDate is timestamp
+          && d.endDate is string && d.endDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && d.endTime is string && d.endTime.matches('^[0-9]{2}:[0-9]{2}$')
+          && d.eventEndDate is timestamp && d.eventEndDate > d.eventDate
+          && d.rsvpEnabled is bool
+          && text(d.rsvpUrl,2000) && (d.rsvpUrl == '' || d.rsvpUrl.matches('^https?://.+'))
+          && d.status == 'PUBLISHED' && d.isActive == true && d.updatedAt == request.time;
+      }
+      allow get: if signedIn() && ((!exists(/databases/$(database)/documents/events/$(e)) && admin(myClub())) || (resource.data.status == 'PUBLISHED' && resource.data.isActive == true));
+      allow list: if signedIn() && resource.data.status == 'PUBLISHED' && resource.data.isActive == true;
+      allow create: if admin(request.resource.data.clubId) && validEvent()
+        && request.resource.data.keys().hasAll(['clubId','clubName','clubShortName','authorId','title','description','category','location','date','time','eventDate','endDate','endTime','eventEndDate','rsvpEnabled','rsvpUrl','mediaType','mediaUrl','imageUrl','videoUrl','status','isActive','createdAt','updatedAt'])
+        && request.resource.data.keys().hasOnly(['clubId','clubName','clubShortName','authorId','title','description','category','location','date','time','eventDate','endDate','endTime','eventEndDate','rsvpEnabled','rsvpUrl','mediaType','mediaUrl','imageUrl','videoUrl','status','isActive','createdAt','updatedAt'])
+        && request.resource.data.authorId == request.auth.uid && request.resource.data.createdAt == request.time
+        && request.resource.data.clubName == get(/databases/$(database)/documents/clubs/$(request.resource.data.clubId)).data.name
+        && text(request.resource.data.clubShortName,150)
+        && request.resource.data.mediaType in ['PHOTO','VIDEO']
+        && request.resource.data.mediaUrl == '' && request.resource.data.imageUrl == '' && request.resource.data.videoUrl == '';
+      allow update: if admin(resource.data.clubId) && validEvent()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','description','category','location','date','time','eventDate','endDate','endTime','eventEndDate','rsvpEnabled','rsvpUrl','updatedAt']);
+      allow delete: if admin(resource.data.clubId);
+    }
+    match /clubMembers/{m} {
+      function blockedStatus(s) { return s in ['SUSPENDED','REMOVED','REJECTED']; }
+      function validTransition() {
+        let a = resource.data.status;
+        let b = request.resource.data.status;
+        return (a == 'PENDING' && b in ['ACTIVE','REJECTED','REMOVED'])
+          || (a == 'ACTIVE' && b == 'REMOVED')
+          || (a == 'SUSPENDED' && b == 'REMOVED');
+      }
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || admin(resource.data.clubId));
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll(['userId','clubId','status','joinedAt'])
+        && request.resource.data.keys().hasOnly(['userId','clubId','status','joinedAt'])
+        && request.resource.data.userId == request.auth.uid && request.resource.data.status == 'ACTIVE'
+        && request.resource.data.joinedAt == request.time && approved(request.resource.data.clubId)
+        && !exists(/databases/$(database)/documents/clubRestrictions/$(request.resource.data.clubId)/users/$(request.auth.uid));
+      allow update: if admin(resource.data.clubId) && !activeAdmin(resource.data.userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt'])
+        && request.resource.data.updatedAt == request.time && validTransition()
+        && ((blockedStatus(request.resource.data.status)
+          && getAfter(/databases/$(database)/documents/clubRestrictions/$(resource.data.clubId)/users/$(resource.data.userId)).data.status == request.resource.data.status
+          && getAfter(/databases/$(database)/documents/clubRestrictions/$(resource.data.clubId)/users/$(resource.data.userId)).data.membershipId == m)
+          || (request.resource.data.status == 'ACTIVE'
+          && !existsAfter(/databases/$(database)/documents/clubRestrictions/$(resource.data.clubId)/users/$(resource.data.userId))));
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid && resource.data.status in ['ACTIVE','PENDING'];
+      match /profile/{profileId} {
+        function membership() { return get(/databases/$(database)/documents/clubMembers/$(m)).data; }
+        function validMemberProfile() {
+          let u = getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+          let d = request.resource.data;
+          return d.keys().hasAll(['name','studentNumber','course','year'])
+            && d.keys().hasOnly(['name','studentNumber','course','year'])
+            && d.name == memberText(u.get('name', '')) && d.studentNumber == memberText(u.get('studentNumber', ''))
+            && d.course == memberText(u.get('course', '')) && d.year == memberText(u.get('year', ''));
+        }
+        allow get: if signedIn() && profileId == 'details'
+          && membership().status in ['ACTIVE','PENDING']
+          && (membership().userId == request.auth.uid || admin(membership().clubId));
+        allow create, update: if signedIn() && profileId == 'details'
+          && membership().userId == request.auth.uid && membership().status in ['ACTIVE','PENDING']
+          && validMemberProfile();
+        allow list, delete: if false;
+      }
+    }
+    match /clubRestrictions/{c}/users/{u} {
+      function validRestriction() {
+        let d = request.resource.data;
+        let m = getAfter(/databases/$(database)/documents/clubMembers/$(d.membershipId)).data;
+        return admin(c) && d.keys().hasAll(['status','membershipId','updatedAt'])
+          && d.keys().hasOnly(['status','membershipId','updatedAt'])
+          && d.status in ['REMOVED','REJECTED'] && d.updatedAt == request.time
+          && m.userId == u && m.clubId == c && m.status == d.status;
+      }
+      allow read: if signedIn() && (u == request.auth.uid || admin(c));
+      allow create, update: if validRestriction();
+      allow delete: if admin(c)
+        && getAfter(/databases/$(database)/documents/clubMembers/$(resource.data.membershipId)).data.status == 'ACTIVE';
+    }
+    match /adminNotifications/{n} {
+      allow read: if admin(resource.data.clubId);
+      // Notices are authored by the platform operator in the console.
+      allow write: if false;
+    }
+    // Home reporting and student attendance. Platform moderation is connected separately.
+    match /reports/{r} {
+      function validTarget(d) {
+        let target = get(/databases/$(database)/documents/$(d.targetType == 'POST' ? 'posts' : 'events')/$(d.targetId)).data;
+        return d.targetType in ['POST', 'EVENT']
+          && target.status == 'PUBLISHED' && target.isActive == true;
+      }
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll(['reporterId','targetType','targetId','societyName','reason','description','attachment','category','priority','status','assignedTo','createdAt'])
+        && request.resource.data.keys().hasOnly(['reporterId','targetType','targetId','societyName','reason','description','attachment','category','priority','status','assignedTo','createdAt'])
+        && request.resource.data.reporterId == request.auth.uid
+        && text(request.resource.data.targetId, 150) && request.resource.data.targetId.size() > 0
+        && text(request.resource.data.societyName, 200)
+        && request.resource.data.reason in ['Spam or misleading','Harassment or bullying','Hate speech','Inappropriate content','False information','Violence or threats','Other']
+        && request.resource.data.description == request.resource.data.reason
+        && request.resource.data.attachment == ''
+        && request.resource.data.category == request.resource.data.targetType
+        && request.resource.data.priority == 'NORMAL' && request.resource.data.status == 'OPEN'
+        && request.resource.data.assignedTo == '' && request.resource.data.createdAt == request.time
+        && validTarget(request.resource.data);
+      allow read, update, delete: if false;
+    }
+    match /events/{e}/rsvps/{u} {
+      function openRsvp() {
+        let event = get(/databases/$(database)/documents/events/$(e)).data;
+        return event.status == 'PUBLISHED' && event.isActive == true && event.get('rsvpEnabled', false) == true;
+      }
+      allow get: if signedIn() && request.auth.uid == u;
+      allow create, update: if signedIn() && request.auth.uid == u && openRsvp()
+        && request.resource.data.keys().hasAll(['response','updatedAt'])
+        && request.resource.data.keys().hasOnly(['response','updatedAt'])
+        && request.resource.data.response in ['GOING','INTERESTED','NOT_GOING']
+        && request.resource.data.updatedAt == request.time;
+      allow list, delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

@@ -1,0 +1,56 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function assignedAdmin(clubId) {
+      return request.auth != null
+        && firestore.exists(
+          /databases/(default)/documents/adminAccess/$(request.auth.uid)
+        )
+        && firestore.get(
+          /databases/(default)/documents/adminAccess/$(request.auth.uid)
+        ).data.isActive == true
+        && firestore.get(
+          /databases/(default)/documents/adminAccess/$(request.auth.uid)
+        ).data.clubId == clubId
+        && firestore.get(
+          /databases/(default)/documents/clubs/$(clubId)
+        ).data.isActive == true
+        && firestore.get(
+          /databases/(default)/documents/clubs/$(clubId)
+        ).data.status == "APPROVED"
+        && (
+          !firestore.exists(
+            /databases/(default)/documents/users/$(request.auth.uid)
+          )
+          || firestore.get(
+            /databases/(default)/documents/users/$(request.auth.uid)
+          ).data.accountStatus == "ACTIVE"
+        );
+    }
+
+    match /clubMedia/{clubId}/{fileId} {
+      allow read: if request.auth != null;
+
+      allow create: if assignedAdmin(clubId)
+        && (
+          (
+            request.resource.contentType.matches('image/.*')
+            && request.resource.size <= 10 * 1024 * 1024
+          )
+          || (
+            request.resource.contentType.matches('video/.*')
+            && request.resource.size <= 100 * 1024 * 1024
+          )
+        );
+
+      allow update: if false;
+      allow delete: if assignedAdmin(clubId);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

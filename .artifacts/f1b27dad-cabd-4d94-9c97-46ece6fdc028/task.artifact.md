@@ -1,0 +1,3 @@
+- [x] Change `EventDetailScreenPreview` visibility to public.
+- [x] Fix compilation error in `EventDetailScreen.kt` (`NavDestination.Home` -> `NavDestination.HOME`).
+- [x] Verify the preview renders correctly.
